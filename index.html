@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Two-Player Doodle Jump</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            touch-action: none;
+            background-color: #333;
+            font-family: Arial, sans-serif;
+        }
+        #gameContainer {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            width: 100vw;
+        }
+        #player1Area, #player2Area {
+            position: relative;
+            height: 50%;
+            border: 2px solid #fff;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+        #player1Area {
+            transform: rotate(180deg);
+        }
+        canvas {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+        }
+        .controls {
+            position: absolute;
+            bottom: 10px;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            z-index: 20;
+            pointer-events: none;
+        }
+        .control-btn {
+            width: 80px;
+            height: 80px;
+            background-color: rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            margin: 0 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 30px;
+            color: white;
+            user-select: none;
+            pointer-events: auto;
+        }
+        #player1Controls {
+            transform: rotate(180deg);
+        }
+        .score {
+            position: absolute;
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            padding: 10px;
+            z-index: 10;
+        }
+        #player1Score {
+            left: 10px;
+            bottom: 10px;
+            transform: rotate(180deg);
+        }
+        #player2Score {
+            left: 10px;
+            top: 10px;
+        }
+        #gameOver {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+        #gameOver h1 {
+            font-size: 32px;
+            margin-bottom: 20px;
+        }
+        #restartButton {
+            padding: 10px 20px;
+            font-size: 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="player1Area">
+            <canvas id="player1Canvas"></canvas>
+            <div id="player1Score" class="score">0</div>
+            <div id="player1Controls" class="controls">
+                <div id="player1Left" class="control-btn">←</div>
+                <div id="player1Right" class="control-btn">→</div>
+            </div>
+        </div>
+        <div id="player2Area">
+            <canvas id="player2Canvas"></canvas>
+            <div id="player2Score" class="score">0</div>
+            <div id="player2Controls" class="controls">
+                <div id="player2Left" class="control-btn">←</div>
+                <div id="player2Right" class="control-btn">→</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="gameOver">
+        <h1 id="winnerText">Player 1 Wins!</h1>
+        <button id="restartButton">Play Again</button>
+    </div>
+
+    <script>
+        // Game constants
+        const GAME_WIDTH = 800;
+        const GAME_HEIGHT = 600;
+        const GRAVITY = 0.4;
+        const JUMP_FORCE = -12;
+        const PLATFORM_WIDTH = 80;
+        const PLATFORM_HEIGHT = 15;
+        const PLATFORM_COUNT = 15;
+        const PLAYER_WIDTH = 40;
+        const PLAYER_HEIGHT = 50;
+        const RISING_SPEED = 0.5; // Speed at which the death zone rises
+        const ITEM_SIZE = 30;
+        const ITEM_SPAWN_CHANCE = 0.2; // Chance to spawn an item with a new platform
+
+        // Item types and their effects
+        const ITEM_TYPES = {
+            ROCKET: {
+                color: '#FF4081',
+                effect: (player) => {
+                    player.vy = JUMP_FORCE * 3;
+                    player.rocketActive = true;
+                    player.rocketTimer = 100;
+                }
+            },
+            SPRING: {
+                color: '#2196F3',
+                effect: (player) => {
+                    player.vy = JUMP_FORCE * 2;
+                }
+            },
+            SHIELD: {
+                color: '#FFEB3B',
+                effect: (player) => {
+                    player.shieldActive = true;
+                    player.shieldTimer = 300;
+                }
+            },
+            SLOW_TIME: {
+                color: '#9C27B0',
+                effect: (player) => {
+                    const otherPlayer = player.isPlayer1 ? player2 : player1;
+                    otherPlayer.slowedDown = true;
+                    otherPlayer.slowTimer = 200;
+                }
+            }
+        };
+
+        // Platform types
+        const PLATFORM_TYPES = {
+            NORMAL: 0,
+            MOVING: 1,
+            BREAKABLE: 2,
+            BOUNCY: 3
+        };
+
+        // Game state
+        let gameRunning = true;
+        let platforms = [];
+        let items = [];
+        let highestPlatformY = 0;
+        let deathLine = GAME_HEIGHT; // Initial position of death line
+        let deathLineOffset = 400; // How far below the highest player the death line should be
+
+        // Player classes
+        class Player {
+            constructor(canvasId, scoreId, isPlayer1) {
+                this.canvas = document.getElementById(canvasId);
+                this.ctx = this.canvas.getContext('2d');
+                this.scoreElement = document.getElementById(scoreId);
+                this.isPlayer1 = isPlayer1;
+
+                this.width = PLAYER_WIDTH;
+                this.height = PLAYER_HEIGHT;
+                this.x = GAME_WIDTH / 2 - this.width / 2;
+                this.y = GAME_HEIGHT - 200;
+                this.vy = 0;
+                this.vx = 0;
+                this.score = 0;
+                this.highestY = this.y;
+                this.color = isPlayer1 ? '#4CAF50' : '#2196F3';
+
+                // Power-up states
+                this.rocketActive = false;
+                this.rocketTimer = 0;
+                this.shieldActive = false;
+                this.shieldTimer = 0;
+                this.slowedDown = false;
+                this.slowTimer = 0;
+
+                this.canvas.width = GAME_WIDTH;
+                this.canvas.height = GAME_HEIGHT;
+
+                // Set up touch events
+                this.setupTouchControls();
+            }
+
+            setupTouchControls() {
+                // Get control buttons
+                const leftBtn = this.isPlayer1
+                    ? document.getElementById('player1Left')
+                    : document.getElementById('player2Left');
+
+                const rightBtn = this.isPlayer1
+                    ? document.getElementById('player1Right')
+                    : document.getElementById('player2Right');
+
+                // For player 1, the controls are visually flipped due to the rotation
+                // So we need to swap the actual movement direction
+                const leftMove = this.isPlayer1 ? 8 : -8;  // For player 1, "left" button moves right
+                const rightMove = this.isPlayer1 ? -8 : 8; // For player 1, "right" button moves left
+
+                // Set up touch events for left button
+                leftBtn.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    this.vx = leftMove;
+                });
+
+                leftBtn.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    this.vx = 0;
+                });
+
+                // Set up touch events for right button
+                rightBtn.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    this.vx = rightMove;
+                });
+
+                rightBtn.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    this.vx = 0;
+                });
+
+                // Also support keyboard for testing
+                window.addEventListener('keydown', (e) => {
+                    if (this.isPlayer1) {
+                        if (e.key === 'ArrowLeft') this.vx = -8;
+                        if (e.key === 'ArrowRight') this.vx = 8;
+                    } else {
+                        if (e.key === 'a') this.vx = -8;
+                        if (e.key === 'd') this.vx = 8;
+                    }
+                });
+
+                window.addEventListener('keyup', (e) => {
+                    if (this.isPlayer1) {
+                        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') this.vx = 0;
+                    } else {
+                        if (e.key === 'a' || e.key === 'd') this.vx = 0;
+                    }
+                });
+            }
+
+            update(platforms) {
+                // Handle power-up timers
+                if (this.rocketActive) {
+                    this.rocketTimer--;
+                    if (this.rocketTimer <= 0) {
+                        this.rocketActive = false;
+                    }
+                }
+
+                if (this.shieldActive) {
+                    this.shieldTimer--;
+                    if (this.shieldTimer <= 0) {
+                        this.shieldActive = false;
+                    }
+                }
+
+                if (this.slowedDown) {
+                    this.slowTimer--;
+                    if (this.slowTimer <= 0) {
+                        this.slowedDown = false;
+                    }
+                }
+
+                // Apply gravity (unless rocket is active)
+                if (!this.rocketActive) {
+                    this.vy += GRAVITY;
+                }
+
+                // Apply slow effect
+                const movementMultiplier = this.slowedDown ? 0.5 : 1;
+
+                // Update position
+                this.y += this.vy * movementMultiplier;
+                this.x += this.vx * movementMultiplier;
+
+                // Wrap around the sides
+                if (this.x > GAME_WIDTH) {
+                    this.x = 0;
+                } else if (this.x < 0) {
+                    this.x = GAME_WIDTH - this.width;
+                }
+
+                // Check for item collisions
+                for (let i = 0; i < items.length; i++) {
+                    const item = items[i];
+
+                    if (!item.collected &&
+                        this.x + this.width > item.x &&
+                        this.x < item.x + ITEM_SIZE &&
+                        this.y + this.height > item.y &&
+                        this.y < item.y + ITEM_SIZE) {
+
+                        // Apply item effect
+                        ITEM_TYPES[item.type].effect(this);
+
+                        // Mark item as collected
+                        item.collected = true;
+                    }
+                }
+
+                // Check if falling
+                if (this.vy > 0 && !this.rocketActive) {
+                    // Check for collisions with platforms only when falling
+                    for (let i = 0; i < platforms.length; i++) {
+                        const p = platforms[i];
+
+                        if (this.vy > 0 &&
+                            this.x + this.width > p.x &&
+                            this.x < p.x + p.width &&
+                            this.y + this.height > p.y &&
+                            this.y + this.height < p.y + p.height + this.vy) {
+
+                            // Bounce off platform
+                            if (p.type === PLATFORM_TYPES.BOUNCY) {
+                                this.vy = JUMP_FORCE * 1.5; // Extra bounce
+                            } else {
+                                this.vy = JUMP_FORCE;
+                            }
+
+                            // Handle breakable platforms
+                            if (p.type === PLATFORM_TYPES.BREAKABLE) {
+                                p.broken = true;
+                            }
+                        }
+                    }
+                }
+
+                // Update highest position and score
+                if (this.y < this.highestY) {
+                    this.highestY = this.y;
+                    this.score = Math.floor((GAME_HEIGHT - this.highestY) / 10);
+                    this.scoreElement.textContent = this.score;
+                }
+
+                // Check if player fell off the bottom or hit the death line
+                if (this.y > GAME_HEIGHT + 200 || (this.y + this.height > deathLine && !this.shieldActive)) {
+                    gameRunning = false;
+                    showGameOver();
+                }
+            }
+
+            draw() {
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // Calculate camera offset to follow player
+                const cameraOffsetY = this.y - (GAME_HEIGHT * 0.4); // Position player at 40% from top
+
+                // Save the context state
+                this.ctx.save();
+
+                // Translate everything by the camera offset
+                this.ctx.translate(0, -cameraOffsetY);
+
+                // Draw rising death zone
+                this.ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+                this.ctx.fillRect(0, deathLine, GAME_WIDTH, GAME_HEIGHT);
+
+                // Add warning pattern to death zone
+                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                const stripeHeight = 20;
+                for (let y = deathLine; y < deathLine + GAME_HEIGHT; y += stripeHeight * 2) {
+                    this.ctx.fillRect(0, y, GAME_WIDTH, stripeHeight);
+                }
+
+                // Draw platforms
+                for (let i = 0; i < platforms.length; i++) {
+                    const p = platforms[i];
+                    if (p.broken) continue;
+
+                    // Only draw platforms that are within the view
+                    if (p.y > cameraOffsetY - 50 && p.y < cameraOffsetY + GAME_HEIGHT + 50) {
+                        switch (p.type) {
+                            case PLATFORM_TYPES.NORMAL:
+                                this.ctx.fillStyle = '#795548';
+                                break;
+                            case PLATFORM_TYPES.MOVING:
+                                this.ctx.fillStyle = '#FF9800';
+                                break;
+                            case PLATFORM_TYPES.BREAKABLE:
+                                this.ctx.fillStyle = '#F44336';
+                                break;
+                            case PLATFORM_TYPES.BOUNCY:
+                                this.ctx.fillStyle = '#9C27B0';
+                                break;
+                        }
+
+                        this.ctx.fillRect(p.x, p.y, p.width, p.height);
+                    }
+                }
+
+                // Draw items
+                for (let i = 0; i < items.length; i++) {
+                    const item = items[i];
+                    if (item.collected) continue;
+
+                    // Only draw items that are within the view
+                    if (item.y > cameraOffsetY - 50 && item.y < cameraOffsetY + GAME_HEIGHT + 50) {
+                        this.ctx.fillStyle = ITEM_TYPES[item.type].color;
+
+                        // Draw different shapes based on item type
+                        switch(item.type) {
+                            case 'ROCKET':
+                                // Draw rocket shape
+                                this.ctx.beginPath();
+                                this.ctx.moveTo(item.x + ITEM_SIZE/2, item.y);
+                                this.ctx.lineTo(item.x + ITEM_SIZE, item.y + ITEM_SIZE*0.7);
+                                this.ctx.lineTo(item.x + ITEM_SIZE*0.7, item.y + ITEM_SIZE*0.7);
+                                this.ctx.lineTo(item.x + ITEM_SIZE*0.7, item.y + ITEM_SIZE);
+                                this.ctx.lineTo(item.x + ITEM_SIZE*0.3, item.y + ITEM_SIZE);
+                                this.ctx.lineTo(item.x + ITEM_SIZE*0.3, item.y + ITEM_SIZE*0.7);
+                                this.ctx.lineTo(item.x, item.y + ITEM_SIZE*0.7);
+                                this.ctx.closePath();
+                                this.ctx.fill();
+                                break;
+
+                            case 'SPRING':
+                                // Draw spring shape
+                                this.ctx.fillRect(item.x + ITEM_SIZE*0.2, item.y, ITEM_SIZE*0.6, ITEM_SIZE*0.2);
+                                this.ctx.fillRect(item.x + ITEM_SIZE*0.3, item.y + ITEM_SIZE*0.2, ITEM_SIZE*0.4, ITEM_SIZE*0.6);
+                                this.ctx.fillRect(item.x + ITEM_SIZE*0.1, item.y + ITEM_SIZE*0.8, ITEM_SIZE*0.8, ITEM_SIZE*0.2);
+                                break;
+
+                            case 'SHIELD':
+                                // Draw shield shape
+                                this.ctx.beginPath();
+                                this.ctx.arc(item.x + ITEM_SIZE/2, item.y + ITEM_SIZE/2, ITEM_SIZE/2, 0, Math.PI * 2);
+                                this.ctx.fill();
+                                this.ctx.strokeStyle = 'white';
+                                this.ctx.lineWidth = 2;
+                                this.ctx.stroke();
+                                break;
+
+                            case 'SLOW_TIME':
+                                // Draw hourglass shape
+                                this.ctx.beginPath();
+                                this.ctx.moveTo(item.x, item.y);
+                                this.ctx.lineTo(item.x + ITEM_SIZE, item.y);
+                                this.ctx.lineTo(item.x + ITEM_SIZE*0.7, item.y + ITEM_SIZE*0.5);
+                                this.ctx.lineTo(item.x + ITEM_SIZE, item.y + ITEM_SIZE);
+                                this.ctx.lineTo(item.x, item.y + ITEM_SIZE);
+                                this.ctx.lineTo(item.x + ITEM_SIZE*0.3, item.y + ITEM_SIZE*0.5);
+                                this.ctx.closePath();
+                                this.ctx.fill();
+                                break;
+
+                            default:
+                                // Default square shape
+                                this.ctx.fillRect(item.x, item.y, ITEM_SIZE, ITEM_SIZE);
+                        }
+                    }
+                }
+
+                // Draw current player with any active effects
+                this.ctx.fillStyle = this.color;
+
+                // Draw player with visual effects for power-ups
+                if (this.rocketActive) {
+                    // Draw rocket flames
+                    this.ctx.fillStyle = '#FF9800';
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(this.x + 10, this.y + this.height);
+                    this.ctx.lineTo(this.x + 5, this.y + this.height + 20);
+                    this.ctx.lineTo(this.x + 15, this.y + this.height + 10);
+                    this.ctx.lineTo(this.x + 20, this.y + this.height + 25);
+                    this.ctx.lineTo(this.x + 25, this.y + this.height + 10);
+                    this.ctx.lineTo(this.x + 35, this.y + this.height + 20);
+                    this.ctx.lineTo(this.x + 30, this.y + this.height);
+                    this.ctx.closePath();
+                    this.ctx.fill();
+
+                    // Draw player
+                    this.ctx.fillStyle = this.color;
+                    this.ctx.fillRect(this.x, this.y, this.width, this.height);
+                } else {
+                    // Draw normal player
+                    this.ctx.fillRect(this.x, this.y, this.width, this.height);
+                }
+
+                // Draw shield if active
+                if (this.shieldActive) {
+                    this.ctx.strokeStyle = '#FFEB3B';
+                    this.ctx.lineWidth = 3;
+                    this.ctx.beginPath();
+                    this.ctx.arc(this.x + this.width/2, this.y + this.height/2,
+                                 this.width * 0.8, 0, Math.PI * 2);
+                    this.ctx.stroke();
+                }
+
+                // Draw slow effect if active
+                if (this.slowedDown) {
+                    this.ctx.fillStyle = 'rgba(155, 39, 176, 0.3)';
+                    this.ctx.fillRect(this.x - 5, this.y - 5, this.width + 10, this.height + 10);
+                }
+
+                // Draw eyes and mouth
+                this.ctx.fillStyle = 'white';
+                this.ctx.fillRect(this.x + 8, this.y + 10, 8, 8);
+                this.ctx.fillRect(this.x + 24, this.y + 10, 8, 8);
+                this.ctx.fillRect(this.x + 12, this.y + 30, 16, 5);
+
+                // Draw the other player
+                const otherPlayer = this.isPlayer1 ? player2 : player1;
+
+                // Check if other player is in view
+                if (otherPlayer.y > cameraOffsetY - 50 && otherPlayer.y < cameraOffsetY + GAME_HEIGHT + 50) {
+                    // Draw other player if in view
+                    this.ctx.fillStyle = otherPlayer.color;
+                    this.ctx.fillRect(otherPlayer.x, otherPlayer.y, otherPlayer.width, otherPlayer.height);
+
+                    // Draw power-up effects for other player
+                    if (otherPlayer.rocketActive) {
+                        // Draw rocket flames
+                        this.ctx.fillStyle = '#FF9800';
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(otherPlayer.x + 10, otherPlayer.y + otherPlayer.height);
+                        this.ctx.lineTo(otherPlayer.x + 5, otherPlayer.y + otherPlayer.height + 20);
+                        this.ctx.lineTo(otherPlayer.x + 15, otherPlayer.y + otherPlayer.height + 10);
+                        this.ctx.lineTo(otherPlayer.x + 20, otherPlayer.y + otherPlayer.height + 25);
+                        this.ctx.lineTo(otherPlayer.x + 25, otherPlayer.y + otherPlayer.height + 10);
+                        this.ctx.lineTo(otherPlayer.x + 35, otherPlayer.y + otherPlayer.height + 20);
+                        this.ctx.lineTo(otherPlayer.x + 30, otherPlayer.y + otherPlayer.height);
+                        this.ctx.closePath();
+                        this.ctx.fill();
+                    }
+
+                    // Draw shield if active
+                    if (otherPlayer.shieldActive) {
+                        this.ctx.strokeStyle = '#FFEB3B';
+                        this.ctx.lineWidth = 3;
+                        this.ctx.beginPath();
+                        this.ctx.arc(otherPlayer.x + otherPlayer.width/2, otherPlayer.y + otherPlayer.height/2,
+                                     otherPlayer.width * 0.8, 0, Math.PI * 2);
+                        this.ctx.stroke();
+                    }
+
+                    // Draw slow effect if active
+                    if (otherPlayer.slowedDown) {
+                        this.ctx.fillStyle = 'rgba(155, 39, 176, 0.3)';
+                        this.ctx.fillRect(otherPlayer.x - 5, otherPlayer.y - 5,
+                                          otherPlayer.width + 10, otherPlayer.height + 10);
+                    }
+
+                    // Draw eyes and mouth for other player
+                    this.ctx.fillStyle = 'white';
+                    this.ctx.fillRect(otherPlayer.x + 8, otherPlayer.y + 10, 8, 8);
+                    this.ctx.fillRect(otherPlayer.x + 24, otherPlayer.y + 10, 8, 8);
+                    this.ctx.fillRect(otherPlayer.x + 12, otherPlayer.y + 30, 16, 5);
+                } else {
+                    // Draw indicator for other player
+                    this.ctx.restore(); // Reset translation for the indicator
+
+                    const arrowSize = 20;
+                    this.ctx.fillStyle = otherPlayer.color;
+
+                    // Calculate direction to other player
+                    const isAbove = otherPlayer.y < cameraOffsetY;
+                    const isBelow = otherPlayer.y > cameraOffsetY + GAME_HEIGHT;
+
+                    // Draw arrow indicator
+                    if (isAbove) {
+                        // Calculate x position based on relative positions
+                        let arrowX = otherPlayer.x;
+                        // Keep arrow within bounds
+                        arrowX = Math.max(arrowSize, Math.min(GAME_WIDTH - arrowSize, arrowX));
+
+                        // Draw up arrow at top of screen
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(arrowX, 30);
+                        this.ctx.lineTo(arrowX - arrowSize, 30 + arrowSize);
+                        this.ctx.lineTo(arrowX + arrowSize, 30 + arrowSize);
+                        this.ctx.closePath();
+                        this.ctx.fill();
+
+                        // Add distance text
+                        this.ctx.fillStyle = "white";
+                        this.ctx.font = "14px Arial";
+                        this.ctx.textAlign = "center";
+                        const distance = Math.round((this.y - otherPlayer.y) / 10);
+                        this.ctx.fillText(distance + "m", arrowX, 60);
+                    } else if (isBelow) {
+                        // Calculate x position based on relative positions
+                        let arrowX = otherPlayer.x;
+                        // Keep arrow within bounds
+                        arrowX = Math.max(arrowSize, Math.min(GAME_WIDTH - arrowSize, arrowX));
+
+                        // Draw down arrow at bottom of screen
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(arrowX, GAME_HEIGHT - 30);
+                        this.ctx.lineTo(arrowX - arrowSize, GAME_HEIGHT - 30 - arrowSize);
+                        this.ctx.lineTo(arrowX + arrowSize, GAME_HEIGHT - 30 - arrowSize);
+                        this.ctx.closePath();
+                        this.ctx.fill();
+
+                        // Add distance text
+                        this.ctx.fillStyle = "white";
+                        this.ctx.font = "14px Arial";
+                        this.ctx.textAlign = "center";
+                        const distance = Math.round((otherPlayer.y - this.y) / 10);
+                        this.ctx.fillText(distance + "m", arrowX, GAME_HEIGHT - 60);
+                    }
+
+                    return; // Skip restoring context as we already did it
+                }
+
+                // Restore the context state
+                this.ctx.restore();
+            }
+        }
+
+        // Initialize players
+        const player1 = new Player('player1Canvas', 'player1Score', true);
+        const player2 = new Player('player2Canvas', 'player2Score', false);
+
+        // Generate random platforms
+        function generatePlatforms() {
+            platforms = [];
+            items = [];
+
+            // Create starter platform
+            platforms.push({
+                x: GAME_WIDTH / 2 - PLATFORM_WIDTH / 2,
+                y: GAME_HEIGHT - 100,
+                width: PLATFORM_WIDTH,
+                height: PLATFORM_HEIGHT,
+                type: PLATFORM_TYPES.NORMAL,
+                broken: false,
+                direction: 1,
+                speed: 0
+            });
+
+            // Generate random platforms
+            for (let i = 0; i < PLATFORM_COUNT; i++) {
+                const type = Math.random() < 0.7
+                    ? PLATFORM_TYPES.NORMAL
+                    : Math.random() < 0.5
+                        ? PLATFORM_TYPES.MOVING
+                        : Math.random() < 0.5
+                            ? PLATFORM_TYPES.BREAKABLE
+                            : PLATFORM_TYPES.BOUNCY;
+
+                const platform = {
+                    x: Math.random() * (GAME_WIDTH - PLATFORM_WIDTH),
+                    y: (GAME_HEIGHT - 100) - (i * (GAME_HEIGHT / PLATFORM_COUNT)),
+                    width: PLATFORM_WIDTH,
+                    height: PLATFORM_HEIGHT,
+                    type: type,
+                    broken: false,
+                    direction: Math.random() < 0.5 ? 1 : -1,
+                    speed: Math.random() * 2 + 1
+                };
+
+                platforms.push(platform);
+
+                // Chance to spawn an item
+                if (Math.random() < ITEM_SPAWN_CHANCE) {
+                    spawnItem(platform.x + platform.width / 2, platform.y - ITEM_SIZE - 5);
+                }
+
+                if (platform.y < highestPlatformY || i === 0) {
+                    highestPlatformY = platform.y;
+                }
+            }
+        }
+
+        // Spawn a new item
+        function spawnItem(x, y) {
+            // Choose a random item type
+            const itemTypes = Object.keys(ITEM_TYPES);
+            const randomType = itemTypes[Math.floor(Math.random() * itemTypes.length)];
+
+            items.push({
+                x: x - ITEM_SIZE / 2,
+                y: y,
+                type: randomType,
+                collected: false
+            });
+        }
+
+        // Update platforms
+        function updatePlatforms() {
+            for (let i = 0; i < platforms.length; i++) {
+                const p = platforms[i];
+
+                // Move horizontal platforms
+                if (p.type === PLATFORM_TYPES.MOVING) {
+                    p.x += p.speed * p.direction;
+
+                    if (p.x + p.width > GAME_WIDTH) {
+                        p.direction = -1;
+                    } else if (p.x < 0) {
+                        p.direction = 1;
+                    }
+                }
+
+                // Add new platforms if we're getting close to the top
+                if (Math.min(player1.highestY, player2.highestY) < highestPlatformY + 500) {
+                    const type = Math.random() < 0.7
+                        ? PLATFORM_TYPES.NORMAL
+                        : Math.random() < 0.5
+                            ? PLATFORM_TYPES.MOVING
+                            : Math.random() < 0.5
+                                ? PLATFORM_TYPES.BREAKABLE
+                                : PLATFORM_TYPES.BOUNCY;
+
+                    const platform = {
+                        x: Math.random() * (GAME_WIDTH - PLATFORM_WIDTH),
+                        y: highestPlatformY - Math.random() * 100 - 50,
+                        width: PLATFORM_WIDTH,
+                        height: PLATFORM_HEIGHT,
+                        type: type,
+                        broken: false,
+                        direction: Math.random() < 0.5 ? 1 : -1,
+                        speed: Math.random() * 2 + 1
+                    };
+
+                    platforms.push(platform);
+                    highestPlatformY = platform.y;
+
+                    // Chance to spawn an item with new platform
+                    if (Math.random() < ITEM_SPAWN_CHANCE) {
+                        spawnItem(platform.x + platform.width / 2, platform.y - ITEM_SIZE - 5);
+                    }
+                }
+
+                // Remove platforms that are too far below
+                const lowestY = Math.max(player1.y, player2.y);
+                platforms = platforms.filter(p => p.y < lowestY + 1000);
+            }
+
+            // Remove collected or distant items
+            const lowestY = Math.max(player1.y, player2.y);
+            items = items.filter(item => !item.collected && item.y < lowestY + 1000);
+        }
+
+        // Show game over screen
+        function showGameOver() {
+            const gameOverElement = document.getElementById('gameOver');
+            const winnerTextElement = document.getElementById('winnerText');
+
+            if (player1.score > player2.score) {
+                winnerTextElement.textContent = 'Player 1 Wins!';
+            } else if (player2.score > player1.score) {
+                winnerTextElement.textContent = 'Player 2 Wins!';
+            } else {
+                winnerTextElement.textContent = 'It\'s a Tie!';
+            }
+
+            gameOverElement.style.display = 'flex';
+        }
+
+        // Restart game
+        function restartGame() {
+            player1.x = GAME_WIDTH / 2 - player1.width / 2;
+            player1.y = GAME_HEIGHT - 200;
+            player1.vy = 0;
+            player1.vx = 0;
+            player1.score = 0;
+            player1.highestY = player1.y;
+            player1.scoreElement.textContent = '0';
+            player1.rocketActive = false;
+            player1.rocketTimer = 0;
+            player1.shieldActive = false;
+            player1.shieldTimer = 0;
+            player1.slowedDown = false;
+            player1.slowTimer = 0;
+
+            player2.x = GAME_WIDTH / 2 - player2.width / 2;
+            player2.y = GAME_HEIGHT - 200;
+            player2.vy = 0;
+            player2.vx = 0;
+            player2.score = 0;
+            player2.highestY = player2.y;
+            player2.scoreElement.textContent = '0';
+            player2.rocketActive = false;
+            player2.rocketTimer = 0;
+            player2.shieldActive = false;
+            player2.shieldTimer = 0;
+            player2.slowedDown = false;
+            player2.slowTimer = 0;
+
+            // Reset death line
+            deathLine = GAME_HEIGHT;
+
+            generatePlatforms();
+            gameRunning = true;
+
+            document.getElementById('gameOver').style.display = 'none';
+        }
+
+        // Update rising death line
+        function updateDeathLine() {
+            // Get highest player position
+            const minPlayerY = Math.min(player1.y, player2.y);
+
+            // Set target position for death line
+            const targetY = minPlayerY + deathLineOffset;
+
+            // Move death line upward
+            if (deathLine > targetY) {
+                // Move faster when players are higher up to increase difficulty
+                const currentLevel = Math.max(0, (GAME_HEIGHT - minPlayerY) / 1000);
+                const adjustedSpeed = RISING_SPEED * (1 + currentLevel);
+
+                deathLine -= adjustedSpeed;
+            }
+        }
+
+        // Game loop
+        function gameLoop() {
+            if (gameRunning) {
+                updatePlatforms();
+                updateDeathLine();
+
+                player1.update(platforms);
+                player2.update(platforms);
+
+                player1.draw();
+                player2.draw();
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Initialize game
+        function init() {
+            generatePlatforms();
+
+            document.getElementById('restartButton').addEventListener('click', restartGame);
+
+            // Prevent default touch behavior
+            document.addEventListener('touchmove', function(e) {
+                e.preventDefault();
+            }, { passive: false });
+
+            gameLoop();
+        }
+
+        // Start game when page is loaded
+        window.onload = init;
+    </script>
+</body>
+</html>
